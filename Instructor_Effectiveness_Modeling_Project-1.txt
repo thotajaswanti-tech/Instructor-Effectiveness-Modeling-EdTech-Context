@@ -1,0 +1,683 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "id": "e7ad72f7",
+   "metadata": {},
+   "source": [
+    "# Instructor Effectiveness Modeling — EdTech\n",
+    "\n",
+    "**Role:** Data Science / AI Content Specialist Intern  \n",
+    "**Goal:** Analyze batch-level learner data, define instructor effectiveness, aggregate it to instructor level, and build a classical ML model to predict effectiveness tiers.\n",
+    "\n",
+    "> **Important:** Place the provided CSV in the same folder as this notebook and update `CSV_PATH` if required. No external dataset is used.\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "481092cc",
+   "metadata": {},
+   "source": [
+    "## 1. Problem Understanding\n",
+    "\n",
+    "The EdTech platform runs the same courses across multiple batches taught by different instructors. One instructor may teach multiple batches and courses.\n",
+    "\n",
+    "We will:\n",
+    "1. Explore the data.\n",
+    "2. Define an **Instructor Effectiveness Score** using learner outcomes, engagement, and feedback.\n",
+    "3. Aggregate batch-level observations to instructor level.\n",
+    "4. Convert the score into **Low / Medium / High** tiers.\n",
+    "5. Train a classical ML classifier.\n",
+    "6. Evaluate and interpret the model.\n",
+    "7. Discuss limitations and ethical use.\n",
+    "\n",
+    "### Main assumption\n",
+    "\n",
+    "Higher completion, score improvement, quiz performance, watch time, assignment submission, forum activity, feedback score, and feedback response are generally positive indicators, while dropout rate is negative. The indicators are normalized before combining them.\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "2f32085c",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Imports\n",
+    "import numpy as np\n",
+    "import pandas as pd\n",
+    "import matplotlib.pyplot as plt\n",
+    "import seaborn as sns\n",
+    "\n",
+    "from sklearn.model_selection import train_test_split\n",
+    "from sklearn.preprocessing import StandardScaler\n",
+    "from sklearn.pipeline import Pipeline\n",
+    "from sklearn.linear_model import LogisticRegression\n",
+    "from sklearn.metrics import (\n",
+    "    classification_report,\n",
+    "    confusion_matrix,\n",
+    "    balanced_accuracy_score,\n",
+    "    f1_score,\n",
+    "    precision_score,\n",
+    "    recall_score\n",
+    ")\n",
+    "\n",
+    "pd.set_option(\"display.max_columns\", None)\n",
+    "sns.set_theme(style=\"whitegrid\")\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "eb108d6b",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Load the provided CSV\n",
+    "# Change this filename if your provided CSV has a different name.\n",
+    "\n",
+    "CSV_PATH = \"instructor_effectiveness.csv\"\n",
+    "\n",
+    "df = pd.read_csv(CSV_PATH)\n",
+    "\n",
+    "print(\"Shape:\", df.shape)\n",
+    "display(df.head())\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "975c56c1",
+   "metadata": {},
+   "source": [
+    "## 2. Dataset Validation\n",
+    "\n",
+    "Expected columns from the assignment:\n",
+    "\n",
+    "- `batch_id`\n",
+    "- `instructor_id`\n",
+    "- `course_id`\n",
+    "- `completion_rate`\n",
+    "- `dropout_rate`\n",
+    "- `avg_score_improvement`\n",
+    "- `avg_quiz_score`\n",
+    "- `avg_watch_time`\n",
+    "- `assignment_submission_rate`\n",
+    "- `forum_activity_rate`\n",
+    "- `avg_feedback_score`\n",
+    "- `feedback_response_rate`\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "ab602227",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "expected_columns = [\n",
+    "    \"batch_id\", \"instructor_id\", \"course_id\",\n",
+    "    \"completion_rate\", \"dropout_rate\", \"avg_score_improvement\",\n",
+    "    \"avg_quiz_score\", \"avg_watch_time\",\n",
+    "    \"assignment_submission_rate\", \"forum_activity_rate\",\n",
+    "    \"avg_feedback_score\", \"feedback_response_rate\"\n",
+    "]\n",
+    "\n",
+    "missing_columns = [c for c in expected_columns if c not in df.columns]\n",
+    "\n",
+    "if missing_columns:\n",
+    "    raise ValueError(f\"Missing expected columns: {missing_columns}\")\n",
+    "\n",
+    "print(\"All expected columns are present.\")\n",
+    "display(df.info())\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "704ccf63",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Basic quality checks\n",
+    "print(\"Duplicate rows:\", df.duplicated().sum())\n",
+    "print(\"\\nMissing values:\")\n",
+    "display(df.isnull().sum().to_frame(\"missing_count\"))\n",
+    "\n",
+    "print(\"\\nUnique instructors:\", df[\"instructor_id\"].nunique())\n",
+    "print(\"Unique batches:\", df[\"batch_id\"].nunique())\n",
+    "print(\"Unique courses:\", df[\"course_id\"].nunique())\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "624960ab",
+   "metadata": {},
+   "source": [
+    "## 3. Exploratory Data Analysis\n",
+    "\n",
+    "The first checks focus on distributions, relationships, missing values, and unusual observations. Because the unit of analysis initially is a course batch, we avoid treating repeated instructor rows as independent instructors until aggregation.\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "259f7bbf",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "numeric_cols = [\n",
+    "    \"completion_rate\", \"dropout_rate\", \"avg_score_improvement\",\n",
+    "    \"avg_quiz_score\", \"avg_watch_time\",\n",
+    "    \"assignment_submission_rate\", \"forum_activity_rate\",\n",
+    "    \"avg_feedback_score\", \"feedback_response_rate\"\n",
+    "]\n",
+    "\n",
+    "display(df[numeric_cols].describe().T)\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "400cbc8f",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Distribution plots\n",
+    "for col in numeric_cols:\n",
+    "    plt.figure(figsize=(7, 4))\n",
+    "    sns.histplot(df[col].dropna(), kde=True)\n",
+    "    plt.title(f\"Distribution of {col}\")\n",
+    "    plt.xlabel(col)\n",
+    "    plt.ylabel(\"Frequency\")\n",
+    "    plt.tight_layout()\n",
+    "    plt.show()\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "7fb563a5",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Correlation heatmap\n",
+    "plt.figure(figsize=(11, 8))\n",
+    "corr = df[numeric_cols].corr()\n",
+    "sns.heatmap(corr, annot=True, fmt=\".2f\", cmap=\"coolwarm\", center=0)\n",
+    "plt.title(\"Correlation Between Batch-Level Metrics\")\n",
+    "plt.tight_layout()\n",
+    "plt.show()\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "882d9129",
+   "metadata": {},
+   "source": [
+    "### Early observations\n",
+    "\n",
+    "The correlation matrix should be interpreted carefully. Some metrics can measure similar learner behavior, so strong correlation does not prove causation. For example, assignment submission and completion may naturally move together.\n",
+    "\n",
+    "The most important checks after running the notebook are:\n",
+    "- whether missing values exist,\n",
+    "- whether any metric contains values outside its expected range,\n",
+    "- whether there are extreme outliers,\n",
+    "- and whether several variables are strongly correlated.\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "5f996eef",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Range checks for variables expected to be between 0 and 1\n",
+    "rate_cols = [\n",
+    "    \"completion_rate\", \"dropout_rate\", \"avg_watch_time\",\n",
+    "    \"assignment_submission_rate\", \"forum_activity_rate\",\n",
+    "    \"feedback_response_rate\"\n",
+    "]\n",
+    "\n",
+    "for col in rate_cols:\n",
+    "    bad = ((df[col] < 0) | (df[col] > 1)).sum()\n",
+    "    print(f\"{col}: {bad} values outside [0, 1]\")\n",
+    "\n",
+    "print(\"\\navg_feedback_score range:\")\n",
+    "print(df[\"avg_feedback_score\"].min(), \"to\", df[\"avg_feedback_score\"].max())\n",
+    "\n",
+    "print(\"\\navg_quiz_score range:\")\n",
+    "print(df[\"avg_quiz_score\"].min(), \"to\", df[\"avg_quiz_score\"].max())\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "4ff3191e",
+   "metadata": {},
+   "source": [
+    "## 4. Data Cleaning\n",
+    "\n",
+    "For the effectiveness calculation, missing numeric values are imputed using the **median**. Median imputation is less sensitive to extreme values than the mean.\n",
+    "\n",
+    "For identifiers, rows without an instructor ID cannot contribute to instructor-level analysis and are removed.\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "392dc4fd",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "df = df.dropna(subset=[\"instructor_id\"]).copy()\n",
+    "\n",
+    "for col in numeric_cols:\n",
+    "    df[col] = df[col].fillna(df[col].median())\n",
+    "\n",
+    "print(\"Remaining missing values:\")\n",
+    "display(df[expected_columns].isnull().sum())\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "1b93bc55",
+   "metadata": {},
+   "source": [
+    "## 5. Define Instructor Effectiveness\n",
+    "\n",
+    "There is no predefined formula in the assignment, so we define a transparent composite score.\n",
+    "\n",
+    "### Proposed score\n",
+    "\n",
+    "After scaling each metric to a comparable 0–1 range:\n",
+    "\n",
+    "- Completion: **15%**\n",
+    "- Dropout (reverse scored): **15%**\n",
+    "- Score improvement: **15%**\n",
+    "- Quiz score: **10%**\n",
+    "- Watch time: **10%**\n",
+    "- Assignment submission: **10%**\n",
+    "- Forum activity: **5%**\n",
+    "- Feedback score: **10%**\n",
+    "- Feedback response rate: **10%**\n",
+    "\n",
+    "The weights emphasize learner outcomes while still including engagement and learner feedback.\n",
+    "\n",
+    "For dropout, lower is better, so it is converted to `1 - normalized_dropout`.\n",
+    "\n",
+    "Because score improvement and quiz score may have different scales, min-max normalization is applied to the observed dataset.\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "f72b182c",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Create normalized metrics\n",
+    "score_cols = [\n",
+    "    \"completion_rate\", \"dropout_rate\", \"avg_score_improvement\",\n",
+    "    \"avg_quiz_score\", \"avg_watch_time\",\n",
+    "    \"assignment_submission_rate\", \"forum_activity_rate\",\n",
+    "    \"avg_feedback_score\", \"feedback_response_rate\"\n",
+    "]\n",
+    "\n",
+    "def minmax(series):\n",
+    "    lo = series.min()\n",
+    "    hi = series.max()\n",
+    "    if hi == lo:\n",
+    "        return pd.Series(np.ones(len(series)) * 0.5, index=series.index)\n",
+    "    return (series - lo) / (hi - lo)\n",
+    "\n",
+    "norm = pd.DataFrame(index=df.index)\n",
+    "\n",
+    "for col in score_cols:\n",
+    "    norm[col] = minmax(df[col])\n",
+    "\n",
+    "# Reverse dropout: high value means better performance\n",
+    "norm[\"dropout_good\"] = 1 - norm[\"dropout_rate\"]\n",
+    "\n",
+    "weights = {\n",
+    "    \"completion_rate\": 0.15,\n",
+    "    \"dropout_good\": 0.15,\n",
+    "    \"avg_score_improvement\": 0.15,\n",
+    "    \"avg_quiz_score\": 0.10,\n",
+    "    \"avg_watch_time\": 0.10,\n",
+    "    \"assignment_submission_rate\": 0.10,\n",
+    "    \"forum_activity_rate\": 0.05,\n",
+    "    \"avg_feedback_score\": 0.10,\n",
+    "    \"feedback_response_rate\": 0.10\n",
+    "}\n",
+    "\n",
+    "df[\"batch_effectiveness_score\"] = sum(\n",
+    "    norm[col] * weight for col, weight in weights.items()\n",
+    ")\n",
+    "\n",
+    "display(df[[\"instructor_id\", \"batch_id\", \"batch_effectiveness_score\"]].head())\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "e368f5e2",
+   "metadata": {},
+   "source": [
+    "## 6. Aggregate Batch Data to Instructor Level\n",
+    "\n",
+    "An instructor may teach many batches. Therefore, the final unit for modeling is the **instructor**, not the batch.\n",
+    "\n",
+    "For continuous metrics, the primary aggregation is the mean because it represents typical instructor performance across batches.\n",
+    "\n",
+    "We also calculate the number of batches. This is important because an instructor with one batch has less evidence than an instructor with many batches.\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "fea3cf94",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "agg_dict = {col: \"mean\" for col in numeric_cols}\n",
+    "agg_dict[\"batch_effectiveness_score\"] = \"mean\"\n",
+    "\n",
+    "instructor_df = df.groupby(\"instructor_id\").agg(agg_dict)\n",
+    "\n",
+    "instructor_df[\"batch_count\"] = df.groupby(\"instructor_id\")[\"batch_id\"].nunique()\n",
+    "\n",
+    "instructor_df = instructor_df.reset_index()\n",
+    "\n",
+    "print(\"Instructor-level shape:\", instructor_df.shape)\n",
+    "display(instructor_df.head())\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "2b20b91f",
+   "metadata": {},
+   "source": [
+    "### Handling few vs many batches\n",
+    "\n",
+    "Averages make different instructors comparable, but they do not remove uncertainty caused by small sample sizes.\n",
+    "\n",
+    "Therefore:\n",
+    "- instructors with very few batches should be interpreted cautiously;\n",
+    "- `batch_count` is retained as a transparency/context variable;\n",
+    "- effectiveness tiers should not be treated as permanent rankings;\n",
+    "- where the business has enough data, confidence intervals or hierarchical/mixed-effects methods would be preferable.\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "b45a7133",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Convert instructor effectiveness score into Low / Medium / High.\n",
+    "# Tertiles are used so the tiers are data-driven rather than based on arbitrary cutoffs.\n",
+    "\n",
+    "q1 = instructor_df[\"batch_effectiveness_score\"].quantile(1/3)\n",
+    "q2 = instructor_df[\"batch_effectiveness_score\"].quantile(2/3)\n",
+    "\n",
+    "def make_tier(x):\n",
+    "    if x <= q1:\n",
+    "        return \"Low\"\n",
+    "    elif x <= q2:\n",
+    "        return \"Medium\"\n",
+    "    return \"High\"\n",
+    "\n",
+    "instructor_df[\"effectiveness_tier\"] = instructor_df[\"batch_effectiveness_score\"].apply(make_tier)\n",
+    "\n",
+    "print(\"Tier cutoffs:\")\n",
+    "print(\"Low <= \", round(q1, 4))\n",
+    "print(\"Medium <= \", round(q2, 4))\n",
+    "print(\"\\nTier counts:\")\n",
+    "display(instructor_df[\"effectiveness_tier\"].value_counts())\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "d2bdce5b",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "plt.figure(figsize=(7, 4))\n",
+    "sns.histplot(instructor_df[\"batch_effectiveness_score\"], bins=10, kde=True)\n",
+    "plt.axvline(q1, linestyle=\"--\", label=\"Low/Medium cutoff\")\n",
+    "plt.axvline(q2, linestyle=\"--\", label=\"Medium/High cutoff\")\n",
+    "plt.title(\"Instructor Effectiveness Score\")\n",
+    "plt.xlabel(\"Effectiveness Score\")\n",
+    "plt.ylabel(\"Number of Instructors\")\n",
+    "plt.legend()\n",
+    "plt.tight_layout()\n",
+    "plt.show()\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "8e3605f9",
+   "metadata": {},
+   "source": [
+    "## 7. Machine Learning Model\n",
+    "\n",
+    "A **Logistic Regression** classifier is used because:\n",
+    "- it is a classical ML method allowed by the assignment;\n",
+    "- it is simple and interpretable;\n",
+    "- coefficients can indicate how features are associated with tier predictions;\n",
+    "- a simple model is appropriate when the goal emphasizes reasoning rather than model complexity.\n",
+    "\n",
+    "### Important limitation: target leakage\n",
+    "\n",
+    "The effectiveness tier was constructed from the same learner metrics used as predictors. Therefore, a model trained directly on those components can partly learn the formula used to create the target rather than discover an independent real-world relationship.\n",
+    "\n",
+    "This notebook therefore treats the ML result as a demonstration of tier classification, **not as proof that the model can independently measure instructor quality**.\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "e2bf6d5a",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Features for the illustrative tier classifier\n",
+    "model_features = numeric_cols + [\"batch_count\"]\n",
+    "\n",
+    "X = instructor_df[model_features]\n",
+    "y = instructor_df[\"effectiveness_tier\"]\n",
+    "\n",
+    "print(\"Class distribution:\")\n",
+    "display(y.value_counts())\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "943034b7",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Stratified split when each class has enough observations.\n",
+    "# If the dataset is too small for stratification, fall back to a normal split.\n",
+    "\n",
+    "class_counts = y.value_counts()\n",
+    "\n",
+    "if len(class_counts) == 3 and class_counts.min() >= 2:\n",
+    "    X_train, X_test, y_train, y_test = train_test_split(\n",
+    "        X, y, test_size=0.25, random_state=42, stratify=y\n",
+    "    )\n",
+    "else:\n",
+    "    print(\"Warning: not enough observations in every class for stratified splitting.\")\n",
+    "    X_train, X_test, y_train, y_test = train_test_split(\n",
+    "        X, y, test_size=0.25, random_state=42\n",
+    "    )\n",
+    "\n",
+    "model = Pipeline([\n",
+    "    (\"scaler\", StandardScaler()),\n",
+    "    (\"classifier\", LogisticRegression(max_iter=2000, class_weight=\"balanced\"))\n",
+    "])\n",
+    "\n",
+    "model.fit(X_train, y_train)\n",
+    "pred = model.predict(X_test)\n",
+    "\n",
+    "print(\"Balanced accuracy:\", round(balanced_accuracy_score(y_test, pred), 4))\n",
+    "print(\"Macro F1:\", round(f1_score(y_test, pred, average=\"macro\", zero_division=0), 4))\n",
+    "print(\"Macro precision:\", round(precision_score(y_test, pred, average=\"macro\", zero_division=0), 4))\n",
+    "print(\"Macro recall:\", round(recall_score(y_test, pred, average=\"macro\", zero_division=0), 4))\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "098e2c5d",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Detailed evaluation\n",
+    "print(classification_report(y_test, pred, zero_division=0))\n",
+    "\n",
+    "labels = [\"Low\", \"Medium\", \"High\"]\n",
+    "cm = confusion_matrix(y_test, pred, labels=labels)\n",
+    "\n",
+    "plt.figure(figsize=(6, 5))\n",
+    "sns.heatmap(cm, annot=True, fmt=\"d\", xticklabels=labels, yticklabels=labels, cmap=\"Blues\")\n",
+    "plt.xlabel(\"Predicted\")\n",
+    "plt.ylabel(\"Actual\")\n",
+    "plt.title(\"Confusion Matrix\")\n",
+    "plt.tight_layout()\n",
+    "plt.show()\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "52115723",
+   "metadata": {},
+   "source": [
+    "## 8. Feature Interpretation\n",
+    "\n",
+    "Because Logistic Regression is used, standardized coefficients provide an interpretable view of the model.\n",
+    "\n",
+    "A positive coefficient for a class means that larger values of that feature increase the model's tendency toward that class, holding other features constant.\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "c3f6f3c5",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "classifier = model.named_steps[\"classifier\"]\n",
+    "\n",
+    "coef_df = pd.DataFrame(\n",
+    "    classifier.coef_,\n",
+    "    columns=model_features,\n",
+    "    index=classifier.classes_\n",
+    ")\n",
+    "\n",
+    "display(coef_df.T)\n",
+    "\n",
+    "# Absolute average coefficient magnitude across classes\n",
+    "importance = coef_df.abs().mean(axis=0).sort_values(ascending=False)\n",
+    "\n",
+    "plt.figure(figsize=(9, 5))\n",
+    "importance.sort_values().plot(kind=\"barh\")\n",
+    "plt.title(\"Average Absolute Logistic Regression Coefficient\")\n",
+    "plt.xlabel(\"Coefficient magnitude\")\n",
+    "plt.tight_layout()\n",
+    "plt.show()\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "9d95a428",
+   "metadata": {},
+   "source": [
+    "## 9. Mandatory Analysis Questions\n",
+    "\n",
+    "### 1. Which features most influenced instructor effectiveness, and why?\n",
+    "\n",
+    "The strongest influences should be identified from the coefficient/importance plot **after running the notebook**. Conceptually, completion, dropout, score improvement, and engagement measures are important because they directly reflect learner outcomes and participation.\n",
+    "\n",
+    "### 2. Which variables could be misleading or confounded?\n",
+    "\n",
+    "Potential confounders include course difficulty, learner ability, batch size, prior learner knowledge, course duration, assessment difficulty, and instructor-course matching. Feedback can also be biased by learner expectations or satisfaction with the course rather than teaching quality alone.\n",
+    "\n",
+    "### 3. How could this model fail in real-world usage?\n",
+    "\n",
+    "It may fail when the learner population changes, a new course is introduced, data is sparse, metrics are measured differently, or instructor effectiveness is influenced by factors absent from the dataset. Small numbers of batches can also make an instructor's average unstable.\n",
+    "\n",
+    "### 4. What additional data would improve the analysis?\n",
+    "\n",
+    "Useful additions include batch size, learner pre-test score, learner demographics in aggregated/privacy-safe form, course difficulty, instructor experience, attendance, live-session participation, assignment quality, assessment difficulty, course duration, and longitudinal learner outcomes.\n",
+    "\n",
+    "### 5. Should this model be used for instructor performance evaluation?\n",
+    "\n",
+    "**Not as a standalone decision tool.** It can support coaching and quality improvement, but it should not be used alone for hiring, firing, compensation, or punitive ranking. The model is based on observational learner data and may reflect course or learner differences rather than instructor ability.\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "a3675730",
+   "metadata": {},
+   "source": [
+    "## 10. EdTech Product Recommendations\n",
+    "\n",
+    "The analysis could support:\n",
+    "\n",
+    "- **Instructor dashboards:** show strengths and areas for improvement.\n",
+    "- **Early-warning systems:** identify batches with low completion or high dropout.\n",
+    "- **Coaching recommendations:** suggest interventions based on engagement patterns.\n",
+    "- **Course improvement:** separate instructor-related patterns from course-related problems.\n",
+    "- **Trend monitoring:** track effectiveness across multiple batches instead of judging one batch alone.\n",
+    "\n",
+    "The product should show uncertainty and supporting metrics rather than presenting a single score as an absolute measure of teaching quality.\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "87cca93a",
+   "metadata": {},
+   "source": [
+    "## 11. Limitations and Ethical Considerations\n",
+    "\n",
+    "1. The effectiveness score is a constructed metric, not a ground-truth measurement.\n",
+    "2. The ML target is derived from observed performance indicators, creating potential target leakage.\n",
+    "3. Small batch counts can make instructor averages unreliable.\n",
+    "4. Correlation does not establish that an instructor caused the observed learner outcomes.\n",
+    "5. Learner feedback may contain systematic bias.\n",
+    "6. The model should not be used as the sole basis for employment or disciplinary decisions.\n",
+    "7. Future versions should validate performance on future cohorts and monitor fairness across relevant groups.\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "c1ae7547",
+   "metadata": {},
+   "source": [
+    "## 12. Final Conclusion\n",
+    "\n",
+    "This project defines instructor effectiveness as a transparent composite of learner outcomes, engagement, and feedback. Batch-level data is aggregated to instructor level so that instructors who teach multiple batches can be analyzed consistently.\n",
+    "\n",
+    "A Logistic Regression classifier provides an interpretable baseline for predicting Low, Medium, and High effectiveness tiers. However, the model should be treated as an analytical support tool rather than an objective measure of teaching quality because the target itself is constructed from the available metrics.\n",
+    "\n",
+    "The most important business value is therefore not the raw accuracy of the classifier, but the ability to identify patterns, explain them clearly, recognize limitations, and use the findings responsibly in an EdTech product.\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python 3",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "name": "python",
+   "version": "3.x"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 5
+}
